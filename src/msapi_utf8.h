@@ -1,9 +1,12 @@
 /*
  * MSAPI_UTF8: Common API calls using UTF-8 strings
- * Compensating for what Microsoft should have done a long long time ago.
- * Also see https://utf8everywhere.org
+ * Compensating for what Microsoft should have done a long long time ago, that they
+ * ONLY started to do in mid-2019 (What the £%^& took them so long?!?), as per:
+ * https://docs.microsoft.com/en-us/windows/uwp/design/globalizing/use-utf8-code-page
  *
- * Copyright © 2010-2020 Pete Batard <pete@akeo.ie>
+ * See also: https://utf8everywhere.org
+ *
+ * Copyright © 2010-2021 Pete Batard <pete@akeo.ie>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -314,6 +317,18 @@ static __inline HMODULE LoadLibraryU(LPCSTR lpFileName)
 	return ret;
 }
 
+static __inline HMODULE LoadLibraryExU(LPCSTR lpFileName, HANDLE hFile, DWORD dwFlags)
+{
+	HMODULE ret;
+	DWORD err = ERROR_INVALID_DATA;
+	wconvert(lpFileName);
+	ret = LoadLibraryExW(wlpFileName, hFile, dwFlags);
+	err = GetLastError();
+	wfree(lpFileName);
+	SetLastError(err);
+	return ret;
+}
+
 static __inline int DrawTextU(HDC hDC, LPCSTR lpText, int nCount, LPRECT lpRect, UINT uFormat)
 {
 	int ret;
@@ -568,13 +583,27 @@ static __inline BOOL GetTextExtentPointU(HDC hdc, const char* lpString, LPSIZE l
 	return ret;
 }
 
+// A UTF-8 alternative to MS GetCurrentDirectory() since the latter is useless for
+// apps installed from the App Store...
 static __inline DWORD GetCurrentDirectoryU(DWORD nBufferLength, char* lpBuffer)
 {
-	DWORD ret = 0, err = ERROR_INVALID_DATA;
+	DWORD i, ret = 0, err = ERROR_INVALID_DATA;
 	// coverity[returned_null]
 	walloc(lpBuffer, nBufferLength);
-	ret = GetCurrentDirectoryW(nBufferLength, wlpBuffer);
+	if (wlpBuffer == NULL) {
+		SetLastError(ERROR_OUTOFMEMORY);
+		return 0;
+	}
+	ret = GetModuleFileNameW(NULL, wlpBuffer, nBufferLength);
 	err = GetLastError();
+	if (ret > 0) {
+		for (i = ret - 1; i > 0; i--) {
+			if (wlpBuffer[i] == L'\\') {
+				wlpBuffer[i] = 0;
+				break;
+			}
+		}
+	}
 	if ((ret != 0) && ((ret = wchar_to_utf8_no_alloc(wlpBuffer, lpBuffer, nBufferLength)) == 0)) {
 		err = GetLastError();
 	}
@@ -609,6 +638,19 @@ static __inline UINT GetSystemWindowsDirectoryU(char* lpBuffer, UINT uSize)
 		err = GetLastError();
 	}
 	wfree(lpBuffer);
+	SetLastError(err);
+	return ret;
+}
+
+static __inline BOOL SHGetSpecialFolderPathU(HWND hwnd, char* pszPath, int csidl, BOOL fCreate)
+{
+	BOOL ret;
+	DWORD err = ERROR_INVALID_DATA;
+	// pszPath is at least MAX_PATH characters in size
+	WCHAR wpszPath[MAX_PATH] = { 0 };
+	ret = SHGetSpecialFolderPathW(hwnd, wpszPath, csidl, fCreate);
+	err = GetLastError();
+	wchar_to_utf8_no_alloc(wpszPath, pszPath, MAX_PATH);
 	SetLastError(err);
 	return ret;
 }

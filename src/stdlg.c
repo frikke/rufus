@@ -1,7 +1,7 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
  * Standard Dialog Routines (Browse for folder, About, etc)
- * Copyright © 2011-2020 Pete Batard <pete@akeo.ie>
+ * Copyright © 2011-2021 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -45,7 +45,7 @@
 #include "license.h"
 
 /* Globals */
-extern BOOL is_x86_32;
+extern BOOL is_x86_32, appstore_version;
 static HICON hMessageIcon = (HICON)INVALID_HANDLE_VALUE;
 static char* szMessageText = NULL;
 static char* szMessageTitle = NULL;
@@ -59,9 +59,8 @@ static const notification_info* notification_more_info;
 static const char* notification_dont_display_setting;
 static WNDPROC update_original_proc = NULL;
 static HWINEVENTHOOK ap_weh = NULL;
-static char title_str[3][128], button_str[128];
+static char title_str[2][128], button_str[128];
 HWND hFidoDlg = NULL;
-BOOL close_fido_cookie_prompts = FALSE;
 
 static int update_settings_reposition_ids[] = {
 	IDI_ICON,
@@ -589,7 +588,7 @@ INT_PTR CALLBACK AboutCallback(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 		ResizeButtonHeight(hDlg, IDOK);
 		static_sprintf(about_blurb, about_blurb_format, lmprintf(MSG_174|MSG_RTF),
 			lmprintf(MSG_175|MSG_RTF, rufus_version[0], rufus_version[1], rufus_version[2]),
-			"Copyright © 2011-2020 Pete Batard / Akeo",
+			"Copyright © 2011-2021 Pete Batard / Akeo",
 			lmprintf(MSG_176|MSG_RTF), lmprintf(MSG_177|MSG_RTF), lmprintf(MSG_178|MSG_RTF));
 		for (i=0; i<ARRAYSIZE(hEdit); i++) {
 			hEdit[i] = GetDlgItem(hDlg, edit_id[i]);
@@ -1550,6 +1549,28 @@ out:
 	return 0;
 }
 
+void SetFidoCheck(void)
+{
+	// Detect if we can use Fido, which depends on:
+	// - Powershell being installed
+	// - Rufus running in AppStore mode or update check being enabled
+	// - URL for the script being reachable
+	if ((ReadRegistryKey32(REGKEY_HKLM, "Microsoft\\PowerShell\\1\\Install") <= 0) &&
+		(ReadRegistryKey32(REGKEY_HKLM, "Microsoft\\PowerShell\\3\\Install") <= 0)) {
+		ubprintf("Notice: The ISO download feature has been deactivated because "
+			"a compatible PowerShell version was not detected on this system.");
+		return;
+	}
+
+	if (!appstore_version && (ReadSetting32(SETTING_UPDATE_INTERVAL) <= 0)) {
+		ubprintf("Notice: The ISO download feature has been deactivated because "
+			"'Check for updates' is disabled in your settings.");
+		return;
+	}
+
+	CreateThread(NULL, 0, CheckForFidoThread, NULL, 0, NULL);
+}
+
 /*
  * Initial update check setup
  */
@@ -1595,18 +1616,7 @@ BOOL SetUpdateCheck(void)
 			 ((ReadSetting32(SETTING_UPDATE_INTERVAL) == -1) && enable_updates) )
 			WriteSetting32(SETTING_UPDATE_INTERVAL, 86400);
 	}
-	// Also detect if we can use Fido, which depends on:
-	// - Powershell being installed
-	// - Update check being enabled
-	// - URL for the script being reachable
-	if (((ReadRegistryKey32(REGKEY_HKLM, "Microsoft\\PowerShell\\1\\Install") > 0) ||
-		 (ReadRegistryKey32(REGKEY_HKLM, "Microsoft\\PowerShell\\3\\Install") > 0)) &&
-		(ReadSetting32(SETTING_UPDATE_INTERVAL) > 0)) {
-		CreateThread(NULL, 0, CheckForFidoThread, NULL, 0, NULL);
-	} else {
-		ubprintf("Notice: The ISO download feature has been deactivated because "
-			"'Check for updates' is disabled in your settings.");
-	}
+	SetFidoCheck();
 	return TRUE;
 }
 
@@ -1978,14 +1988,13 @@ INT_PTR MyDialogBox(HINSTANCE hInstance, int Dialog_ID, HWND hWndParent, DLGPROC
 
 /*
  * The following function calls are used to automatically detect and close the native
- * Windows format prompt "You must format the disk in drive X:" as well as the cookies
- * alert being popped by Windows when running our Download script. To do that, we use
+ * Windows format prompt "You must format the disk in drive X:". To do that, we use
  * an event hook that gets triggered whenever a window is placed in the foreground.
  * In that hook, we look for a dialog that has style WS_POPUPWINDOW and has the relevant
- * title. However, in case of the Format prompt, because the title in itself is too
- * generic (the expectation is that it will be "Microsoft Windows") we also enumerate
- * all the child controls from that prompt, using another callback, until we find one
- * that contains the text we expect for the "Format disk" button.
+ * title. However, because the title in itself is too generic (the expectation is that
+ * it will be "Microsoft Windows") we also enumerate all the child controls from that
+ * prompt, using another callback, until we find one that contains the text we expect
+ * for the "Format disk" button.
  * Oh, and since all of these strings are localized, we must first pick them up from
  * the relevant mui's.
  */
@@ -2017,9 +2026,7 @@ static void CALLBACK AlertPromptHook(HWINEVENTHOOK hWinEventHook, DWORD Event, H
 					SendMessage(hWnd, WM_COMMAND, (WPARAM)IDCANCEL, (LPARAM)0);
 					uprintf("Closed Windows format prompt");
 				}
-			} else if (close_fido_cookie_prompts && strcmp(str, title_str[1]) == 0) {
-				SendMessage(hWnd, WM_COMMAND, (WPARAM)IDCANCEL, (LPARAM)0);
-			} else if ((strcmp(str, title_str[2]) == 0) && (hWnd != hFidoDlg)) {
+			} else if ((strcmp(str, title_str[1]) == 0) && (hWnd != hFidoDlg)) {
 				// A wild Fido dialog appeared! => Keep track of its handle and center it
 				hFidoDlg = hWnd;
 				CenterDialog(hWnd, hMainDialog);
@@ -2036,7 +2043,7 @@ void SetAlertPromptMessages(void)
 	// Fetch the localized strings in the relevant MUI
 	// Must use sysnative_dir rather than system_dir as we may not find the MUI's otherwise
 	static_sprintf(mui_path, "%s\\%s\\shell32.dll.mui", sysnative_dir, GetCurrentMUI());
-	mui_lib = LoadLibraryU(mui_path);
+	mui_lib = LoadLibraryExU(mui_path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
 	if (mui_lib != NULL) {
 		// 4097 = "You need to format the disk in drive %c: before you can use it." (dialog text)
 		// 4125 = "Microsoft Windows" (dialog title)
@@ -2051,17 +2058,7 @@ void SetAlertPromptMessages(void)
 		}
 		FreeLibrary(mui_lib);
 	}
-	static_sprintf(mui_path, "%s\\%s\\urlmon.dll.mui", sysnative_dir, GetCurrentMUI());
-	mui_lib = LoadLibraryU(mui_path);
-	if (mui_lib != NULL) {
-		// 2070 = "Windows Security Warning" (yes, that's what MS uses for a stupid cookie!)
-		if (LoadStringU(mui_lib, 2070, title_str[1], sizeof(title_str[1])) <= 0) {
-			static_strcpy(title_str[1], "Windows Security Warning");
-			uprintf("Warning: Could not locate localized cookie prompt title string in '%s': %s", mui_path, WindowsErrorString());
-		}
-		FreeLibrary(mui_lib);
-	}
-	static_strcpy(title_str[2], lmprintf(MSG_149));
+	static_strcpy(title_str[1], lmprintf(MSG_149));
 }
 
 BOOL SetAlertPromptHook(void)
